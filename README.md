@@ -1,4 +1,4 @@
-# openfm-play
+# openfm-cli
 
 ![open.fm](https://reklama.wp.pl/files/5kyk1vkeekwdx2taw1js/openfm_logo.png)
 
@@ -8,7 +8,7 @@ Skrypt Bash do odtwarzania stacji radiowych z [open.fm](https://open.fm) w termi
 
 ## Opis
 
-`openfm-play` to narzędzie wiersza poleceń, które umożliwia odtwarzanie dowolnych stacji radiowych z serwisu open.fm bezpośrednio w terminalu. Skrypt wykorzystuje VLC w trybie konsoli (`cvlc`) oraz `tmux` do zarządzania sesjami w tle, dzięki czemu muzyka gra nawet po odłączeniu od terminala.
+`openfm-cli` to narzędzie wiersza poleceń, które umożliwia odtwarzanie dowolnych stacji radiowych z serwisu open.fm bezpośrednio w terminalu. Skrypt wykorzystuje VLC w trybie konsoli (`cvlc`) oraz `tmux` do zarządzania sesjami w tle, dzięki czemu muzyka gra nawet po odłączeniu od terminala.
 
 **Główne funkcjonalności:**
 
@@ -23,9 +23,9 @@ Skrypt Bash do odtwarzania stacji radiowych z [open.fm](https://open.fm) w termi
 
 ## Wymagania
 
-- `curl` – pobieranie listy stacji i tokenów streamu
-- `vlc` (konkretnie `cvlc`) – odtwarzanie strumieni audio
-- `tmux` – zarządzanie sesjami w tle
+- `curl` - pobieranie listy stacji i tokenów streamu
+- `vlc` (konkretnie `cvlc`) - odtwarzanie strumieni audio
+- `tmux` - zarządzanie sesjami w tle
 
 ### Instalacja zależności (Debian/Ubuntu)
 
@@ -97,8 +97,8 @@ openfm --list
 
 ## Sterowanie sesją tmux
 
-- **Ctrl+B, D** – Odłącz od sesji (muzyka dalej leci w tle)
-- **Ctrl+C** – Zatrzymaj odtwarzanie (w sesji tmux)
+- **Ctrl+B, D** - Odłącz od sesji (muzyka dalej leci w tle)
+- **Ctrl+C** - Zatrzymaj odtwarzanie (w sesji tmux)
 
 ---
 
@@ -120,9 +120,9 @@ openfm --autostart off
 
 | Plik | Opis |
 |------|------|
-| `~/.cache/openfm-play/stations.tsv` | Cache listy stacji (format: slug TAB id TAB nazwa) |
-| `~/.cache/openfm-play/last_station` | Ostatnio grana stacja |
-| `~/.cache/openfm-play/logs/openfm_*.log` | Logi aktywności i błędów |
+| `~/.cache/openfm-cli/stations.tsv` | Cache listy stacji (format: slug TAB id TAB nazwa) |
+| `~/.cache/openfm-cli/last_station` | Ostatnio grana stacja |
+| `~/.cache/openfm-cli/logs/openfm_*.log` | Logi aktywności i błędów |
 
 ---
 
@@ -173,7 +173,7 @@ openfm --autostart off
 
 ## Licencja
 
-MIT – używaj, modyfikuj, rozprowadzaj swobodnie.
+MIT - używaj, modyfikuj, rozprowadzaj swobodnie.
 
 ---
 
