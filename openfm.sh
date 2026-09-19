@@ -165,6 +165,65 @@ get_stream_url() {
     echo "$url"
 }
 
+# Wyciąga "artysta - tytuł" aktualnie granego utworu z wyrenderowanej strony
+# open.fm/stacje-muzyczne/<slug>. Strona to Next.js SSR, żadne API JSON nie
+# niesie tej informacji (nowPlaying w __NEXT_DATA__ jest zawsze null) — dane
+# siedzą tylko w wyrenderowanym HTML, w bloku <ul class="playSoon">.
+get_now_playing() {
+    local slug="$1" html now_playing_html artist title
+
+    html=$(curl -s -A "$UA" "https://open.fm/stacje-muzyczne/${slug}") || {
+        echo "Błąd: nie udało się pobrać strony stacji." >&2
+        log "BŁĄD: nie udało się pobrać strony open.fm dla now-playing, slug='${slug}'"
+        return 1
+    }
+
+    if [ -z "$html" ]; then
+        echo "Błąd: pusta odpowiedź ze strony open.fm." >&2
+        log "BŁĄD: pusta strona open.fm dla now-playing, slug='${slug}'"
+        return 1
+    fi
+
+    # Pierwszy <li> w playSoon zawiera "Teraz gra:" jako ukryty span,
+    # a treść w <strong>: <b>Artysta</b> - Tytuł
+    # [^<]* zamiast .*? -- grep -E nie wspiera leniwych kwantyfikatorow,
+    # wiec .*? lapalby chciwie az do OSTATNIEGO </strong> na calej stronie
+    now_playing_html=$(echo "$html" | grep -oE '<span class="visuallyhidden">Teraz gra:</span><strong><b>[^<]*</b>[^<]*</strong>' | head -1)
+
+    if [ -z "$now_playing_html" ]; then
+        echo "Błąd: nie znaleziono bloku \"Teraz gra\" na stronie stacji." >&2
+        echo "Strona mogła zmienić układ albo stacja '${slug}' nie ma tej sekcji." >&2
+        log "BŁĄD: brak bloku 'Teraz gra' dla slug='${slug}' (strona mogła się zmienić)"
+        return 1
+    fi
+
+    artist=$(echo "$now_playing_html" | grep -oE '<b>[^<]*</b>' | sed -E 's/<\/?b>//g')
+    title=$(echo "$now_playing_html" | sed -E 's/.*<\/b> - //; s/<\/strong>$//')
+
+    # Odkodowanie encji HTML. &amp; musi być na końcu, żeby nie popsuć
+    # innych encji zaczynających się od "&" (np. najpierw &#x27; -> ',
+    # dopiero potem ewentualne &amp; -> &).
+    decode_entities() {
+        sed -e "s/&#x27;/'/g" -e "s/&#039;/'/g" -e "s/&#39;/'/g" \
+            -e 's/&quot;/"/g' -e 's/&#x22;/"/g' \
+            -e 's/&lt;/</g' -e 's/&gt;/>/g' \
+            -e 's/&nbsp;/ /g' \
+            -e 's/&#x2013;/-/g' -e 's/&#8211;/-/g' \
+            -e 's/&#x2019;/'"'"'/g' -e 's/&#8217;/'"'"'/g' \
+            -e 's/&amp;/\&/g'
+    }
+    artist=$(echo "$artist" | decode_entities)
+    title=$(echo "$title" | decode_entities)
+
+    if [ -z "$artist" ] && [ -z "$title" ]; then
+        echo "Błąd: nie udało się rozdzielić artysty i tytułu." >&2
+        log "BŁĄD: parsing artysta/tytuł nieudany dla slug='${slug}'"
+        return 1
+    fi
+
+    printf '%s - %s\n' "$artist" "$title"
+}
+
 # --- Tryb: dołącz do aktualnie grającej sesji ---
 if [ "${1:-}" == "--attach" ]; then
     require_tmux
@@ -195,10 +254,46 @@ if [ "${1:-}" == "--status" ]; then
     if session_running; then
         CURRENT="$(cat "$LAST_STATION_FILE" 2>/dev/null || echo "?")"
         echo "Gra: $CURRENT" >&2
-        echo "Podłącz się: openfm --attach" >&2
+        if command -v curl >/dev/null 2>&1; then
+            NOW_PLAYING="$(get_now_playing "$CURRENT" 2>/dev/null)" || NOW_PLAYING=""
+            if [ -n "$NOW_PLAYING" ]; then
+                echo "Teraz gra: $NOW_PLAYING" >&2
+            fi
+        fi
     else
         echo "Nic teraz nie gra." >&2
     fi
+    
+    # Stan autostartu
+    if [ -f "$SYSTEMD_UNIT_FILE" ] && systemctl --user is-enabled --quiet "$SYSTEMD_UNIT_NAME" 2>/dev/null; then
+        echo "Autostart: włączony" >&2
+    else
+        echo "Autostart: wyłączony" >&2
+    fi
+    echo "Podłącz się: openfm --attach" >&2
+    exit 0
+fi
+
+# --- Tryb: pokaż aktualnie grany utwór (tytuł i wykonawcę) ---
+if [ "${1:-}" == "--nowplaying" ]; then
+    SLUG_NP="${2:-}"
+
+    if [ -z "$SLUG_NP" ]; then
+        if [ ! -s "$LAST_STATION_FILE" ]; then
+            echo "Nie wiadomo jaka stacja gra. Podaj slug: openfm --nowplaying <slug>" >&2
+            echo "Albo najpierw odpal stację: openfm <slug>" >&2
+            exit 1
+        fi
+        SLUG_NP="$(cat "$LAST_STATION_FILE")"
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Błąd: 'curl' nie jest zainstalowany. Zainstaluj go: sudo apt install curl" >&2
+        exit 1
+    fi
+
+    NOW_PLAYING=$(get_now_playing "$SLUG_NP") || exit 1
+    echo "$NOW_PLAYING"
     exit 0
 fi
 
@@ -235,6 +330,12 @@ if [ "${1:-}" == "--resume" ]; then
     tmux new-session -d -s "$TMUX_SESSION" "$BIN_PATH" --_inner-play "$LAST_SLUG"
     log "Wznawiam (--resume): ${LAST_SLUG}"
     echo "Wznawiam: $LAST_SLUG" >&2
+    if command -v curl >/dev/null 2>&1; then
+        NOW_PLAYING="$(get_now_playing "$LAST_SLUG" 2>/dev/null)" || NOW_PLAYING=""
+        if [ -n "$NOW_PLAYING" ]; then
+            echo "Teraz gra: $NOW_PLAYING" >&2
+        fi
+    fi
     echo "Podłącz się w dowolnym terminalu: openfm --attach" >&2
     exit 0
 fi
@@ -258,23 +359,41 @@ if [ "${1:-}" == "--autostart" ]; then
 
     # MODE == on
     check_dependencies
+    
+    # Jeśli nie ma zapisanej stacji, ustaw domyślną (trance)
     if [ ! -s "$LAST_STATION_FILE" ]; then
-        echo "Nie mam jeszcze zapisanej żadnej odtworzonej stacji." >&2
-        echo "Zagraj cokolwiek najpierw, np: openfm trance" >&2
-        echo "Dopiero potem włącz autostart." >&2
-        exit 1
+        DEFAULT_STATION="trance"
+        echo "$DEFAULT_STATION" > "$LAST_STATION_FILE"
+        log "Autostart: ustawiono domyślną stację '$DEFAULT_STATION'"
+        echo "Ustawiono domyślną stację: $DEFAULT_STATION" >&2
     fi
 
     BIN_PATH="$(readlink -f "$0")"
     mkdir -p "$SYSTEMD_USER_DIR"
 
+    # Upewnij się, że systemd user linger jest włączony
+    if ! loginctl show-user "$USER" --property=Linger 2>/dev/null | grep -q "yes"; then
+        echo "Włączam systemd user linger (potrzeba do autostartu przy logowaniu)..." >&2
+        sudo loginctl enable-linger "$USER" || {
+            echo "Błąd: nie udało się włączyć linger. Spróbuj ręcznie: sudo loginctl enable-linger $USER" >&2
+            exit 1
+        }
+    fi
+
+    # Tworzymy serwis z Type=oneshot i RemainAfterExit=yes
     cat > "$SYSTEMD_UNIT_FILE" <<EOF
 [Unit]
 Description=openfm - wznowienie ostatnio granej stacji
+After=network.target
+Wants=network.target
 
 [Service]
-Type=simple
-ExecStart=${BIN_PATH} --_autostart-run
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=$BIN_PATH --_autostart-run
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -282,7 +401,12 @@ EOF
 
     systemctl --user daemon-reload
     systemctl --user enable --now "$SYSTEMD_UNIT_NAME"
-    echo "Autostart włączony. Przy logowaniu wznowi: $(cat "$LAST_STATION_FILE")" >&2
+    
+    CURRENT_STATION="$(cat "$LAST_STATION_FILE")"
+    echo "Autostart włączony. Przy logowaniu wznowi: $CURRENT_STATION" >&2
+    echo "Uwaga: Jeśli autostart nie działa, upewnij się, że:" >&2
+    echo "  1. systemd user jest włączony (sudo loginctl enable-linger $USER)" >&2
+    echo "  2. masz zainstalowane: tmux, curl, vlc" >&2
     exit 0
 fi
 
@@ -350,10 +474,11 @@ Dostępne komendy:
   openfm <slug-stacji> --url-only    wypisuje sam URL streamu, bez odpalania cvlc
   openfm --attach                    podłącza się do aktualnie grającej sesji (Ctrl+B potem D = odłącz bez zabijania; Ctrl+C = zatrzymuje granie)
   openfm --stop                      zatrzymuje aktualnie grającą sesję
-  openfm --status                    pokazuje czy coś gra i jaka to stacja
+  openfm --status                    pokazuje czy coś gra, jaka to stacja i jaki utwór aktualnie leci
+  openfm --nowplaying [slug]         pokazuje wykonawcę i tytuł aktualnie granego utworu (domyślnie: stacja z --status)
   openfm --logs [N]                  pokazuje ostatnie N linii logu (domyślnie 50) - przydatne gdy stacja nie gra
   openfm --resume                    wznawia ostatnio graną stację, jeśli nic teraz nie gra
-  openfm                              bez argumentów: interaktywny wybór stacji przez fzf (jeśli zainstalowany), inaczej pełna lista
+  openfm                             bez argumentów: interaktywny wybór stacji przez fzf (jeśli zainstalowany), inaczej pełna lista
   openfm --list                      pokazuje pełną listę dostępnych stacji (tekstowo)
   openfm --list <fraza>              wyszukuje stacje po nazwie/slug, np. openfm --list rock
   openfm --refresh                   wymusza odświeżenie listy stacji z open.fm
@@ -476,6 +601,12 @@ if [ "$INNER_PLAY" -eq 0 ]; then
     tmux new-session -d -s "$TMUX_SESSION" "$BIN_PATH" --_inner-play "$SLUG"
     log "Startuję sesję tmux dla stacji '${SLUG}'"
     echo "Odtwarzanie wystartowało w tle." >&2
+    if command -v curl >/dev/null 2>&1; then
+        NOW_PLAYING="$(get_now_playing "$SLUG" 2>/dev/null)" || NOW_PLAYING=""
+        if [ -n "$NOW_PLAYING" ]; then
+            echo "Teraz gra: $NOW_PLAYING" >&2
+        fi
+    fi
     echo "Podłącz się w dowolnym terminalu: openfm --attach" >&2
     exit 0
 fi
