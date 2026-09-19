@@ -20,6 +20,7 @@ Skrypt Bash do odtwarzania stacji radiowych z [open.fm](https://open.fm) w termi
 - Automatyczny reconnect przy zerwaniu połączenia
 - Autostart ostatnio granej stacji przy logowaniu (systemd)
 - Logowanie błędów i aktywności do plików
+- Brak reklam podczas słuchania
 
 ---
 
