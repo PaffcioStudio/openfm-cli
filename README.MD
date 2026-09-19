@@ -4,6 +4,8 @@
 
 Skrypt Bash do odtwarzania stacji radiowych z [open.fm](https://open.fm) w terminalu za pomocą VLC (cvlc).
 
+> **Zastrzeżenie:** to nieoficjalne narzędzie, niezwiązane z open.fm ani Audioteka Group. Korzysta wyłącznie z publicznie dostępnego streamu i publicznej strony serwisu — nie omija żadnych zabezpieczeń ani płatnych treści. Przeznaczone do osobistego użytku (jak nagrywanie radia na kasetę). Używasz na własną odpowiedzialność; nazwa, logo i treści open.fm należą do ich właścicieli.
+
 ---
 
 ## Opis
