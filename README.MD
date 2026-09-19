@@ -26,11 +26,12 @@ Skrypt Bash do odtwarzania stacji radiowych z [open.fm](https://open.fm) w termi
 - `curl` - pobieranie listy stacji i tokenów streamu
 - `vlc` (konkretnie `cvlc`) - odtwarzanie strumieni audio
 - `tmux` - zarządzanie sesjami w tle
+- `ffmpeg` - opcjonalnie, tylko do nagrywania stacji (`--record`)
 
 ### Instalacja zależności (Debian/Ubuntu)
 
 ```bash
-sudo apt update && sudo apt install -y curl vlc tmux
+sudo apt update && sudo apt install -y curl vlc tmux ffmpeg
 ```
 
 ---
@@ -66,6 +67,10 @@ chmod +x openfm.sh
 | `openfm --resume` | Wznawia ostatnio graną stację |
 | `openfm --status` | Pokazuje, co aktualnie gra |
 | `openfm --nowplaying [slug]` | Pokazuje wykonawcę i tytuł aktualnie granego utworu (domyślnie: stacja z `--status`) |
+| `openfm --record <slug>` | Nagrywa stację do pliku w tle, niezależnie od odtwarzania |
+| `openfm --record <slug> --file <ścieżka>` | J.w., pod wskazaną ścieżką (`.mp3` = transkodowanie, inne = surowy `.aac`) |
+| `openfm --record <slug> --time 12h` | J.w., kończy automatycznie po podanym czasie (np. `12h`, `90m`, `3600s`) |
+| `openfm --stop-recording` | Zatrzymuje trwające nagrywanie, bezpiecznie domykając plik |
 | `openfm --list` | Pokazuje pełną listę dostępnych stacji |
 | `openfm --list <fraza>` | Szuka stacji po nazwie/slug (np. `openfm --list rock`) |
 | `openfm --logs [N]` | Pokazuje ostatnie N linii logu (domyślnie 50) |

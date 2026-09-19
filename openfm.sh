@@ -55,6 +55,9 @@ SYSTEMD_UNIT_NAME="openfm-autostart.service"
 SYSTEMD_UNIT_FILE="${SYSTEMD_USER_DIR}/${SYSTEMD_UNIT_NAME}"
 
 TMUX_SESSION="openfm"
+RECORD_TMUX_SESSION="openfm-record"
+RECORD_STATE_FILE="${CACHE_DIR}/recording.state"
+RECORD_DIR="${HOME}/Music/openfm-recordings"
 
 mkdir -p "$CACHE_DIR" "$LOG_DIR"
 
@@ -249,6 +252,221 @@ if [ "${1:-}" == "--stop" ]; then
     exit 0
 fi
 
+recording_running() {
+    command -v tmux >/dev/null 2>&1 && tmux has-session -t "$RECORD_TMUX_SESSION" 2>/dev/null
+}
+
+# Zamienia "12h", "90m", "3600s", "3600" (domyślnie sekundy) na liczbę sekund
+parse_duration() {
+    local input="$1" num unit
+    if [[ "$input" =~ ^([0-9]+)([hms]?)$ ]]; then
+        num="${BASH_REMATCH[1]}"
+        unit="${BASH_REMATCH[2]}"
+        case "$unit" in
+            h) echo $(( num * 3600 )) ;;
+            m) echo $(( num * 60 )) ;;
+            s|"") echo "$num" ;;
+        esac
+        return 0
+    fi
+    return 1
+}
+
+# --- Tryb wewnętrzny: pętla nagrywania wywoływana przez tmux ---
+if [ "${1:-}" == "--_inner-record" ]; then
+    shift
+    REC_SLUG="$1"
+    REC_FILE="$2"
+    REC_MAX_SECONDS="${3:-0}"   # 0 = bez limitu
+
+    LINE=$(grep -P -- "^${REC_SLUG}\t" "$STATIONS_FILE" || true)
+    if [ -z "$LINE" ]; then
+        echo "Nie znaleziono stacji o slug '$REC_SLUG'." >&2
+        log "BŁĄD: nagrywanie - nie znaleziono stacji o slug '${REC_SLUG}'"
+        rm -f "$RECORD_STATE_FILE"
+        exit 1
+    fi
+    STATION_ID=$(echo "$LINE" | cut -f2)
+    STATION_CODE="OFM${STATION_ID}"
+
+    case "$REC_FILE" in
+        *.mp3) OUT_FMT="mp3"; OUT_CODEC="libmp3lame" ;;
+        *)     OUT_FMT="adts"; OUT_CODEC="copy" ;;
+    esac
+
+    START_TS=$(date +%s)
+    log "Start nagrywania: slug='${REC_SLUG}' plik='${REC_FILE}' limit_s='${REC_MAX_SECONDS}'"
+
+    STOP=0
+    trap 'STOP=1' INT TERM
+
+    : > "$REC_FILE"   # utwórz/wyczyść plik docelowy przed pierwszym dopisaniem
+
+    while [ "$STOP" -eq 0 ]; do
+        if [ "$REC_MAX_SECONDS" -gt 0 ]; then
+            ELAPSED=$(( $(date +%s) - START_TS ))
+            REMAINING=$(( REC_MAX_SECONDS - ELAPSED ))
+            if [ "$REMAINING" -le 0 ]; then
+                log "Nagrywanie '${REC_SLUG}': osiągnięto limit czasu, kończę"
+                break
+            fi
+        else
+            REMAINING=0   # 0 dla ffmpeg -t oznacza tu "bez limitu w tej iteracji"
+        fi
+
+        STREAM_URL=$(get_stream_url) || {
+            log "BŁĄD KRYTYCZNY: nie udało się pobrać URL streamu dla nagrywania '${REC_SLUG}', kończę"
+            break
+        }
+
+        REC_ERR_TMP="$(mktemp)"
+        set +e
+        if [ "$REMAINING" -gt 0 ]; then
+            ffmpeg -hide_banner -loglevel warning \
+                -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 \
+                -i "$STREAM_URL" -vn -acodec "$OUT_CODEC" -f "$OUT_FMT" -t "$REMAINING" \
+                - >> "$REC_FILE" 2> "$REC_ERR_TMP"
+        else
+            ffmpeg -hide_banner -loglevel warning \
+                -reconnect 1 -reconnect_streamed 1 -reconnect_on_network_error 1 \
+                -i "$STREAM_URL" -vn -acodec "$OUT_CODEC" -f "$OUT_FMT" \
+                - >> "$REC_FILE" 2> "$REC_ERR_TMP"
+        fi
+        RC=$?
+        set -e
+        cat "$REC_ERR_TMP" >> "$LOG_FILE"
+        rm -f "$REC_ERR_TMP"
+
+        if [ "$STOP" -eq 1 ]; then
+            log "Nagrywanie '${REC_SLUG}' zatrzymane na żądanie (Ctrl+C / --stop-recording)"
+            break
+        fi
+
+        if [ "$RC" -ne 0 ]; then
+            log "BŁĄD: ffmpeg padł (kod ${RC}) przy nagrywaniu '${REC_SLUG}', odświeżam token i wznawiam za 3s"
+            sleep 3
+        fi
+        # RC=0 (np. token wygasł i playlista się skończyła) -> pętla po prostu pobierze nowy URL i doda dalej
+    done
+
+    log "Koniec nagrywania: slug='${REC_SLUG}' plik='${REC_FILE}'"
+    rm -f "$RECORD_STATE_FILE"
+    exit 0
+fi
+
+# --- Tryb: nagraj stację do pliku ---
+if [ "${1:-}" == "--record" ]; then
+    REC_SLUG="${2:-}"
+    if [ -z "$REC_SLUG" ]; then
+        echo "Użycie: openfm --record <slug-stacji> [--file ścieżka] [--time 12h]" >&2
+        exit 1
+    fi
+    shift 2
+
+    REC_FILE=""
+    REC_TIME=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file)
+                REC_FILE="${2:-}"
+                shift 2
+                ;;
+            --time)
+                REC_TIME="${2:-}"
+                shift 2
+                ;;
+            *)
+                echo "Nieznana opcja: $1" >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    require_tmux
+
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        echo "Błąd: 'ffmpeg' nie jest zainstalowany. Zainstaluj go: sudo apt install ffmpeg" >&2
+        exit 1
+    fi
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "Błąd: 'curl' nie jest zainstalowany. Zainstaluj go: sudo apt install curl" >&2
+        exit 1
+    fi
+
+    if recording_running; then
+        EXISTING_INFO="$(cat "$RECORD_STATE_FILE" 2>/dev/null || echo "?")"
+        echo "Nagrywanie już trwa: ${EXISTING_INFO}" >&2
+        echo "Zatrzymaj je najpierw: openfm --stop-recording" >&2
+        exit 1
+    fi
+    # Sesja tmux mogła zostać osierocona (np. po awarii) bez żywego stanu - posprzątaj
+    if tmux has-session -t "$RECORD_TMUX_SESSION" 2>/dev/null; then
+        tmux kill-session -t "$RECORD_TMUX_SESSION" 2>/dev/null || true
+    fi
+
+    if [ -z "$(grep -P -- "^${REC_SLUG}\t" "$STATIONS_FILE" || true)" ]; then
+        echo "Nie znaleziono stacji o slug '$REC_SLUG'." >&2
+        echo "Użyj 'openfm --list' żeby zobaczyć dostępne stacje." >&2
+        exit 1
+    fi
+
+    REC_SECONDS=0
+    if [ -n "$REC_TIME" ]; then
+        REC_SECONDS=$(parse_duration "$REC_TIME") || {
+            echo "Błąd: nieprawidłowy format --time. Użyj np. 12h, 90m, 3600s." >&2
+            exit 1
+        }
+    fi
+
+    if [ -z "$REC_FILE" ]; then
+        mkdir -p "$RECORD_DIR"
+        REC_FILE="${RECORD_DIR}/${REC_SLUG}_$(date '+%Y-%m-%d_%H-%M-%S').aac"
+    fi
+    # Ścieżka względna podana przez użytkownika -> zapamiętaj jako bezwzględną,
+    # bo proces w tmux dziedziczy $PWD z chwili startu sesji, nie z terminala
+    REC_FILE="$(realpath -m -- "$REC_FILE")"
+    mkdir -p "$(dirname -- "$REC_FILE")"
+
+    BIN_PATH="$(readlink -f "$0")"
+    tmux new-session -d -s "$RECORD_TMUX_SESSION" "$BIN_PATH" --_inner-record "$REC_SLUG" "$REC_FILE" "$REC_SECONDS"
+
+    printf 'slug=%s\nfile=%s\nstarted=%s\n' "$REC_SLUG" "$REC_FILE" "$(date '+%Y-%m-%d %H:%M:%S')" > "$RECORD_STATE_FILE"
+
+    echo "Nagrywanie wystartowało w tle: ${REC_SLUG} -> ${REC_FILE}" >&2
+    if [ "$REC_SECONDS" -gt 0 ]; then
+        echo "Zakończy się automatycznie po: ${REC_TIME}" >&2
+    fi
+    echo "Zatrzymaj: openfm --stop-recording" >&2
+    exit 0
+fi
+
+# --- Tryb: zatrzymaj nagrywanie ---
+if [ "${1:-}" == "--stop-recording" ]; then
+    require_tmux
+    if ! recording_running; then
+        echo "Nic teraz nie jest nagrywane." >&2
+        exit 0
+    fi
+    REC_INFO_FILE="$(grep '^file=' "$RECORD_STATE_FILE" 2>/dev/null | cut -d= -f2-)"
+    # SIGINT (nie SIGKILL) do procesu ffmpeg w sesji tmux -> domyka plik poprawnie,
+    # dokladnie tak jak trap INT TERM w petli --_inner-record
+    tmux send-keys -t "$RECORD_TMUX_SESSION" C-c 2>/dev/null || true
+    # Daj chwilę na czyste domknięcie pliku przez ffmpeg, potem posprzątaj sesję
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        recording_running || break
+        sleep 1
+    done
+    if recording_running; then
+        tmux kill-session -t "$RECORD_TMUX_SESSION" 2>/dev/null || true
+    fi
+    rm -f "$RECORD_STATE_FILE"
+    echo "Zatrzymano nagrywanie." >&2
+    if [ -n "$REC_INFO_FILE" ]; then
+        echo "Plik: ${REC_INFO_FILE}" >&2
+    fi
+    exit 0
+fi
+
 # --- Tryb: status ---
 if [ "${1:-}" == "--status" ]; then
     if session_running; then
@@ -262,6 +480,12 @@ if [ "${1:-}" == "--status" ]; then
         fi
     else
         echo "Nic teraz nie gra." >&2
+    fi
+
+    if recording_running; then
+        REC_SLUG_INFO="$(grep '^slug=' "$RECORD_STATE_FILE" 2>/dev/null | cut -d= -f2-)"
+        REC_FILE_INFO="$(grep '^file=' "$RECORD_STATE_FILE" 2>/dev/null | cut -d= -f2-)"
+        echo "Nagrywanie: ${REC_SLUG_INFO:-?} -> ${REC_FILE_INFO:-?}" >&2
     fi
     
     # Stan autostartu
@@ -470,23 +694,27 @@ if [ "${1:-}" == "--help" ] || [ "${1:-}" == "-h" ]; then
 openfm-play.sh — odtwarza dowolną stację z open.fm w cvlc (bez GUI)
 
 Dostępne komendy:
-  openfm <slug-stacji>               odtwarza daną stację w tle (sesja tmux), np. openfm trance
-  openfm <slug-stacji> --url-only    wypisuje sam URL streamu, bez odpalania cvlc
-  openfm --attach                    podłącza się do aktualnie grającej sesji (Ctrl+B potem D = odłącz bez zabijania; Ctrl+C = zatrzymuje granie)
-  openfm --stop                      zatrzymuje aktualnie grającą sesję
-  openfm --status                    pokazuje czy coś gra, jaka to stacja i jaki utwór aktualnie leci
-  openfm --nowplaying [slug]         pokazuje wykonawcę i tytuł aktualnie granego utworu (domyślnie: stacja z --status)
-  openfm --logs [N]                  pokazuje ostatnie N linii logu (domyślnie 50) - przydatne gdy stacja nie gra
-  openfm --resume                    wznawia ostatnio graną stację, jeśli nic teraz nie gra
-  openfm                             bez argumentów: interaktywny wybór stacji przez fzf (jeśli zainstalowany), inaczej pełna lista
-  openfm --list                      pokazuje pełną listę dostępnych stacji (tekstowo)
-  openfm --list <fraza>              wyszukuje stacje po nazwie/slug, np. openfm --list rock
-  openfm --refresh                   wymusza odświeżenie listy stacji z open.fm
-  openfm --install                   instaluje skrypt jako 'openfm' w /usr/local/bin (sudo)
-  openfm --uninstall                 usuwa zainstalowany 'openfm' z /usr/local/bin (sudo)
-  openfm --autostart on              włącza autostart ostatnio granej stacji przy logowaniu
-  openfm --autostart off             wyłącza autostart
-  openfm --help, -h                  pokazuje tę pomoc
+  openfm <slug-stacji>                       odtwarza daną stację w tle (sesja tmux), np. openfm trance
+  openfm <slug-stacji> --url-only            wypisuje sam URL streamu, bez odpalania cvlc
+  openfm --attach                            podłącza się do aktualnie grającej sesji (Ctrl+B potem D = odłącz bez zabijania; Ctrl+C = zatrzymuje granie)
+  openfm --stop                              zatrzymuje aktualnie grającą sesję
+  openfm --status                            pokazuje czy coś gra, jaka to stacja, jaki utwór leci i czy trwa nagrywanie
+  openfm --nowplaying [slug]                 pokazuje wykonawcę i tytuł aktualnie granego utworu (domyślnie: stacja z --status)
+  openfm --record <slug>                     nagrywa stację do pliku w tle, niezależnie od odtwarzania
+  openfm --record <slug> --file <ścieżka>    j.w., ale zapisuje pod wskazaną ścieżką (rozszerzenie .mp3 = transkodowanie, inne = surowy .aac)
+  openfm --record <slug> --time 12h          j.w., ale kończy nagrywanie automatycznie po podanym czasie (np. 12h, 90m, 3600s)
+  openfm --stop-recording                    zatrzymuje trwające nagrywanie, bezpiecznie domykając plik
+  openfm --logs [N]                          pokazuje ostatnie N linii logu (domyślnie 50) - przydatne gdy stacja nie gra
+  openfm --resume                            wznawia ostatnio graną stację, jeśli nic teraz nie gra
+  openfm                                     bez argumentów: interaktywny wybór stacji przez fzf (jeśli zainstalowany), inaczej pełna lista
+  openfm --list                              pokazuje pełną listę dostępnych stacji (tekstowo)
+  openfm --list <fraza>                      wyszukuje stacje po nazwie/slug, np. openfm --list rock
+  openfm --refresh                           wymusza odświeżenie listy stacji z open.fm
+  openfm --install                           instaluje skrypt jako 'openfm' w /usr/local/bin (sudo)
+  openfm --uninstall                         usuwa zainstalowany 'openfm' z /usr/local/bin (sudo)
+  openfm --autostart on                      włącza autostart ostatnio granej stacji przy logowaniu
+  openfm --autostart off                     wyłącza autostart
+  openfm --help, -h                          pokazuje tę pomoc
 
 Jednocześnie może grać tylko jedna stacja (jedna sesja tmux "$TMUX_SESSION").
 Żeby zmienić stację, najpierw zrób --stop, potem odtwórz nową.
